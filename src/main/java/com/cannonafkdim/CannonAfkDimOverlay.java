@@ -34,7 +34,10 @@ public class CannonAfkDimOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
-		if (!plugin.shouldRenderOverlay())
+		boolean dimScreen = plugin.shouldRenderOverlay();
+		boolean warningOnly = plugin.shouldRenderWarningOnly();
+
+		if (!dimScreen && !warningOnly)
 		{
 			return null;
 		}
@@ -47,26 +50,24 @@ public class CannonAfkDimOverlay extends Overlay
 			return null;
 		}
 
-		int opacity = plugin.getCurrentDimOpacity();
+		int opacity = dimScreen ? plugin.getCurrentDimOpacity() : 0;
 
-		if (opacity <= 0)
+		if (opacity > 0)
 		{
-			return null;
+			graphics.setColor(new Color(0, 0, 0, opacity));
+			graphics.fillRect(0, 0, width, height);
 		}
 
-		graphics.setColor(new Color(0, 0, 0, opacity));
-		graphics.fillRect(0, 0, width, height);
-
-		renderText(graphics, width, height);
+		renderText(graphics, width, height, dimScreen);
 
 		return new Dimension(width, height);
 	}
 
-	private void renderText(Graphics2D graphics, int width, int height)
+	private void renderText(Graphics2D graphics, int width, int height, boolean dimScreen)
 	{
 		List<String> lines = new ArrayList<>();
 
-		if (config.showCannonballText())
+		if (dimScreen && config.showCannonballText())
 		{
 			String prefix = config.textPrefix();
 
@@ -78,7 +79,7 @@ public class CannonAfkDimOverlay extends Overlay
 			lines.add(prefix.trim() + ": " + plugin.getCannonballsLeft());
 		}
 
-		if (config.showEstimatedTime())
+		if (dimScreen && config.showEstimatedTime())
 		{
 			String estimatedTimeText = plugin.getEstimatedTimeText();
 
@@ -86,6 +87,28 @@ public class CannonAfkDimOverlay extends Overlay
 			{
 				lines.add(estimatedTimeText.trim());
 			}
+		}
+
+		if (dimScreen && plugin.shouldShowNoBraceletWarning())
+		{
+			lines.add("No bracelet equipped");
+		}
+
+		if (dimScreen && plugin.shouldShowTaskCompletedWarning())
+		{
+			lines.add("TASK COMPLETED");
+		}
+
+		String cannonBreakWarningText = dimScreen ? plugin.getCannonBreakWarningText() : "";
+
+		if (cannonBreakWarningText != null && !cannonBreakWarningText.trim().isEmpty())
+		{
+			lines.add(cannonBreakWarningText.trim());
+		}
+
+		if (plugin.shouldShowCannonInactiveWarning())
+		{
+			lines.add("CANNON INACTIVE");
 		}
 
 		if (lines.isEmpty())
@@ -103,7 +126,6 @@ public class CannonAfkDimOverlay extends Overlay
 
 		int lineHeight = metrics.getHeight();
 		int totalTextHeight = lineHeight * lines.size();
-
 		int y = (height - totalTextHeight) / 2 + metrics.getAscent();
 
 		graphics.setColor(Color.WHITE);

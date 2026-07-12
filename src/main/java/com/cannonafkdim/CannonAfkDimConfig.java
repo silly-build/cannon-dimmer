@@ -146,7 +146,7 @@ public interface CannonAfkDimConfig extends Config
     @ConfigItem(
             keyName = "hideAfterHit",
             name = "Hide after hit",
-            description = "Stops dimming after a damage hitsplat is applied to your character.",
+            description = "Stops dimming when an NPC lands an incoming hit or blocked hit on your character.",
             position = 11
     )
     default boolean hideAfterHit()
@@ -161,7 +161,7 @@ public interface CannonAfkDimConfig extends Config
     @ConfigItem(
             keyName = "hitCooldownTicks",
             name = "Hit cooldown",
-            description = "Number of game ticks to avoid dimming after your character takes damage.",
+            description = "Number of game ticks to keep dimming hidden after an NPC hits your character.",
             position = 12
     )
     default int hitCooldownTicks()
@@ -196,10 +196,54 @@ public interface CannonAfkDimConfig extends Config
     }
 
     @ConfigItem(
+            keyName = "warnWhenNoBracelet",
+            name = "Warn when no bracelet",
+            description = "Shows No bracelet equipped unless a Bracelet of slaughter or Expeditious bracelet is equipped.",
+            position = 15
+    )
+    default boolean warnWhenNoBracelet()
+    {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "showTaskCompletedWarning",
+            name = "Warn when task completed",
+            description = "Shows TASK COMPLETED when no active Slayer task is detected.",
+            position = 16
+    )
+    default boolean showTaskCompletedWarning()
+    {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "showCannonBreakWarning",
+            name = "Warn before cannon breaks",
+            description = "Shows the remaining time during the final 60 seconds before the cannon breaks, then shows CANNON BROKEN until it is repaired.",
+            position = 17
+    )
+    default boolean showCannonBreakWarning()
+    {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "showCannonInactiveWarning",
+            name = "Warn when cannon inactive",
+            description = "Shows CANNON INACTIVE when the placed cannon is out of ammunition or broken.",
+            position = 18
+    )
+    default boolean showCannonInactiveWarning()
+    {
+        return false;
+    }
+
+    @ConfigItem(
             keyName = "showCannonballText",
             name = "Show cannonballs",
             description = "Shows the number of cannonballs remaining in white text.",
-            position = 15
+            position = 19
     )
     default boolean showCannonballText()
     {
@@ -210,7 +254,7 @@ public interface CannonAfkDimConfig extends Config
             keyName = "showEstimatedTime",
             name = "Show ETA",
             description = "Shows an estimated time until the zero dim cannonball value is reached. The average resets when the cannon is reloaded.",
-            position = 16
+            position = 20
     )
     default boolean showEstimatedTime()
     {
@@ -224,8 +268,8 @@ public interface CannonAfkDimConfig extends Config
     @ConfigItem(
             keyName = "textSize",
             name = "Text size",
-            description = "Size of the cannonball count and estimated time text.",
-            position = 17
+            description = "Size of the cannonball count, estimated time, and warning text.",
+            position = 21
     )
     default int textSize()
     {
@@ -236,7 +280,7 @@ public interface CannonAfkDimConfig extends Config
             keyName = "textPrefix",
             name = "Text prefix",
             description = "Text shown before the cannonball count.",
-            position = 18
+            position = 22
     )
     default String textPrefix()
     {

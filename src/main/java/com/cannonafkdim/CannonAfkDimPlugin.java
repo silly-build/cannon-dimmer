@@ -1,17 +1,30 @@
 package com.cannonafkdim;
 
 import com.google.inject.Provides;
+import java.time.Duration;
+import java.util.Locale;
 import javax.inject.Inject;
+import net.runelite.api.Actor;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
+import net.runelite.api.Item;
 import net.runelite.api.Hitsplat;
+import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GraphicChanged;
 import net.runelite.api.events.HitsplatApplied;
+import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.VarbitChanged;
+import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.ItemID;
+import net.runelite.api.gameval.SpotanimID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -21,15 +34,20 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.HotkeyListener;
+import net.runelite.client.util.Text;
 
 @PluginDescriptor(
         name = "Cannon Dimmer",
         description = "Dims the game screen while your dwarf multicannon is placed and loaded",
-        tags = {"cannon", "combat", "overlay", "dim", "timer"}
+        tags = {"cannon", "combat", "overlay", "dim", "timer", "slayer"}
 )
 public class CannonAfkDimPlugin extends Plugin
 {
     private static final int FULLY_BUILT_CANNON_VARP_VALUE = 4;
+
+    private static final long CANNON_BREAK_DURATION_MILLIS = Duration.ofMinutes(25).toMillis();
+    private static final long CANNON_ALMOST_DECAYED_REMAINING_MILLIS = Duration.ofMinutes(5).toMillis();
+    private static final long CANNON_WARNING_THRESHOLD_MILLIS = Duration.ofSeconds(60).toMillis();
 
     @Inject
     private Client client;
@@ -60,6 +78,12 @@ public class CannonAfkDimPlugin extends Plugin
     private int interactionBufferTicksRemaining;
     private boolean playerMovingOrBuffered;
     private WorldPoint lastPlayerWorldPoint;
+
+    private boolean slayerBraceletEquipped;
+    private boolean hasSlayerTask;
+
+    private long cannonBreakAtMillis;
+    private boolean cannonBroken;
 
     private int lastObservedCannonballs = -1;
     private int etaStartCannonballs = -1;
@@ -94,7 +118,10 @@ public class CannonAfkDimPlugin extends Plugin
         {
             refreshCannonState();
             refreshMovementState();
-            refreshHitCooldownState();
+            refreshCombatState();
+            refreshSlayerBraceletState();
+            refreshSlayerTaskState();
+            refreshCannonBreakState();
             updateEstimatedTimeText();
             updateOverlayState();
         });
@@ -118,6 +145,10 @@ public class CannonAfkDimPlugin extends Plugin
         playerMovingOrBuffered = false;
         lastPlayerWorldPoint = null;
 
+        slayerBraceletEquipped = false;
+        hasSlayerTask = false;
+
+        resetCannonBreakTimer();
         resetEtaCalculation();
     }
 
@@ -128,7 +159,10 @@ public class CannonAfkDimPlugin extends Plugin
         {
             refreshCannonState();
             refreshMovementState();
-            refreshHitCooldownState();
+            refreshCombatState();
+            refreshSlayerBraceletState();
+            refreshSlayerTaskState();
+            refreshCannonBreakState();
             updateEstimatedTimeText();
             updateOverlayState();
             return;
@@ -147,6 +181,9 @@ public class CannonAfkDimPlugin extends Plugin
             playerMovingOrBuffered = false;
             lastPlayerWorldPoint = null;
 
+            slayerBraceletEquipped = false;
+            hasSlayerTask = false;
+
             resetEtaCalculation();
         }
     }
@@ -156,24 +193,35 @@ public class CannonAfkDimPlugin extends Plugin
     {
         if (event.getVarpId() == VarPlayerID.DROPCANNON)
         {
-            cannonPlaced = event.getValue() == FULLY_BUILT_CANNON_VARP_VALUE;
-
-            if (!cannonPlaced)
-            {
-                cannonballsLeft = 0;
-                shouldRenderOverlay = false;
-                reloadPauseTicksRemaining = 0;
-                resetEtaCalculation();
-            }
+            updateCannonPlacedState(event.getValue());
         }
         else if (event.getVarpId() == VarPlayerID.ROCKTHROWER)
         {
             handleCannonballCountChanged(event.getValue());
         }
 
+        if (event.getVarpId() == VarPlayerID.SLAYER_COUNT)
+        {
+            refreshSlayerTaskState();
+        }
+
+        refreshCannonBreakState();
         updateEstimatedTimeText();
         updateOverlayState();
     }
+
+    @Subscribe
+    public void onItemContainerChanged(ItemContainerChanged event)
+    {
+        if (event.getContainerId() != InventoryID.WORN)
+        {
+            return;
+        }
+
+        refreshSlayerBraceletState();
+        updateOverlayState();
+    }
+
 
     @Subscribe
     public void onHitsplatApplied(HitsplatApplied event)
@@ -185,6 +233,17 @@ public class CannonAfkDimPlugin extends Plugin
 
         Player localPlayer = client.getLocalPlayer();
 
+        /*
+         * This is the same incoming-hit rule used by RuneLite's built-in
+         * Idle Notifier:
+         *
+         * 1. The actor receiving the hitsplat must be the local player.
+         * 2. Hitsplat#isMine() must be true.
+         *
+         * On the local player, isMine() includes both BLOCK_ME and DAMAGE_ME
+         * hitsplats. That covers incoming zeroes and incoming damage. Cannon
+         * hits fail the first check because their receiving actor is the NPC.
+         */
         if (localPlayer == null || event.getActor() != localPlayer)
         {
             return;
@@ -192,12 +251,38 @@ public class CannonAfkDimPlugin extends Plugin
 
         Hitsplat hitsplat = event.getHitsplat();
 
-        if (hitsplat == null || hitsplat.getAmount() <= 0)
+        if (hitsplat == null || !hitsplat.isMine())
         {
             return;
         }
 
-        hitCooldownTicksRemaining = Math.max(1, config.hitCooldownTicks());
+        triggerAttackCooldown();
+        updateOverlayState();
+    }
+
+    @Subscribe
+    public void onGraphicChanged(GraphicChanged event)
+    {
+        if (!config.hideAfterHit())
+        {
+            return;
+        }
+
+        Player localPlayer = client.getLocalPlayer();
+        Actor actor = event.getActor();
+
+        if (localPlayer == null
+                || actor != localPlayer
+                || !actor.hasSpotAnim(SpotanimID.FAILEDSPELL_IMPACT))
+        {
+            return;
+        }
+
+        /*
+         * RuneLite's Idle Notifier treats a failed incoming spell impact as
+         * combat even when no normal damage hitsplat is produced.
+         */
+        triggerAttackCooldown();
         updateOverlayState();
     }
 
@@ -219,11 +304,49 @@ public class CannonAfkDimPlugin extends Plugin
     }
 
     @Subscribe
+    public void onChatMessage(ChatMessage event)
+    {
+        if (event.getType() != ChatMessageType.GAMEMESSAGE && event.getType() != ChatMessageType.SPAM)
+        {
+            return;
+        }
+
+        String message = Text.removeTags(event.getMessage()).toLowerCase(Locale.ENGLISH);
+
+        if (message.equals("you add the furnace."))
+        {
+            restartCannonBreakTimer();
+        }
+        else if (isCannonDecayWarningMessage(message))
+        {
+            cannonBreakAtMillis = System.currentTimeMillis() + CANNON_ALMOST_DECAYED_REMAINING_MILLIS;
+            cannonBroken = false;
+        }
+        else if (isCannonBrokenMessage(message))
+        {
+            cannonBroken = true;
+            cannonBreakAtMillis = System.currentTimeMillis();
+        }
+        else if (isCannonRepairMessage(message))
+        {
+            restartCannonBreakTimer();
+        }
+        else if (message.contains("you pick up the cannon"))
+        {
+            resetCannonBreakTimer();
+        }
+
+        updateOverlayState();
+    }
+
+    @Subscribe
     public void onGameTick(GameTick event)
     {
         refreshCannonState();
         refreshMovementState();
-        refreshHitCooldownState();
+        refreshCombatState();
+        refreshSlayerTaskState();
+        refreshCannonBreakState();
         updateEstimatedTimeText();
         updateOverlayState();
 
@@ -239,17 +362,36 @@ public class CannonAfkDimPlugin extends Plugin
             return;
         }
 
-        cannonPlaced = client.getVarpValue(VarPlayerID.DROPCANNON) == FULLY_BUILT_CANNON_VARP_VALUE;
+        updateCannonPlacedState(client.getVarpValue(VarPlayerID.DROPCANNON));
 
         if (!cannonPlaced)
         {
-            cannonballsLeft = 0;
-            reloadPauseTicksRemaining = 0;
-            resetEtaCalculation();
             return;
         }
 
         handleCannonballCountChanged(client.getVarpValue(VarPlayerID.ROCKTHROWER));
+    }
+
+    private void updateCannonPlacedState(int cannonState)
+    {
+        boolean wasCannonPlaced = cannonPlaced;
+        cannonPlaced = cannonState == FULLY_BUILT_CANNON_VARP_VALUE;
+
+        if (cannonPlaced)
+        {
+            if (!wasCannonPlaced && cannonBreakAtMillis <= 0L)
+            {
+                restartCannonBreakTimer();
+            }
+
+            return;
+        }
+
+        cannonballsLeft = 0;
+        shouldRenderOverlay = false;
+        reloadPauseTicksRemaining = 0;
+        resetCannonBreakTimer();
+        resetEtaCalculation();
     }
 
     private void handleCannonballCountChanged(int newCannonballCount)
@@ -340,12 +482,20 @@ public class CannonAfkDimPlugin extends Plugin
         lastPlayerWorldPoint = currentWorldPoint;
     }
 
-    private void refreshHitCooldownState()
+    private void refreshCombatState()
     {
-        if (!config.hideAfterHit())
+        if (!config.hideAfterHit() || client.getGameState() != GameState.LOGGED_IN)
         {
             hitCooldownTicksRemaining = 0;
         }
+    }
+
+    private void triggerAttackCooldown()
+    {
+        hitCooldownTicksRemaining = Math.max(
+                hitCooldownTicksRemaining,
+                Math.max(1, config.hitCooldownTicks())
+        );
     }
 
     private void tickDownHitCooldown()
@@ -361,6 +511,101 @@ public class CannonAfkDimPlugin extends Plugin
         if (interactionBufferTicksRemaining > 0)
         {
             interactionBufferTicksRemaining--;
+        }
+    }
+
+    private void refreshSlayerBraceletState()
+    {
+        slayerBraceletEquipped = false;
+
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return;
+        }
+
+        ItemContainer equipment = client.getItemContainer(InventoryID.WORN);
+
+        if (equipment == null)
+        {
+            return;
+        }
+
+        Item[] equippedItems = equipment.getItems();
+        int glovesSlot = EquipmentInventorySlot.GLOVES.getSlotIdx();
+
+        if (glovesSlot < 0 || glovesSlot >= equippedItems.length)
+        {
+            return;
+        }
+
+        Item equippedItem = equippedItems[glovesSlot];
+
+        if (equippedItem == null || equippedItem.getId() <= 0)
+        {
+            return;
+        }
+
+        int equippedItemId = equippedItem.getId();
+
+        slayerBraceletEquipped = equippedItemId == ItemID.BRACELET_OF_SLAUGHTER
+                || equippedItemId == ItemID.EXPEDITIOUS_BRACELET;
+    }
+
+    private boolean isCannonDecayWarningMessage(String message)
+    {
+        return message.contains("cannon has almost decayed")
+                || message.contains("cannon is almost decayed")
+                || message.contains("cannon is about to decay")
+                || message.contains("cannon has nearly decayed");
+    }
+
+    private boolean isCannonBrokenMessage(String message)
+    {
+        return message.contains("cannon has broken")
+                || message.contains("cannon has decayed")
+                || message.contains("cannon has degraded");
+    }
+
+    private boolean isCannonRepairMessage(String message)
+    {
+        return message.contains("you repair your cannon")
+                || message.contains("you fix your cannon");
+    }
+
+    private void refreshSlayerTaskState()
+    {
+        hasSlayerTask = client.getGameState() == GameState.LOGGED_IN
+                && client.getVarpValue(VarPlayerID.SLAYER_COUNT) > 0;
+    }
+
+    private void restartCannonBreakTimer()
+    {
+        cannonBreakAtMillis = System.currentTimeMillis() + CANNON_BREAK_DURATION_MILLIS;
+        cannonBroken = false;
+    }
+
+    private void resetCannonBreakTimer()
+    {
+        cannonBreakAtMillis = 0L;
+        cannonBroken = false;
+    }
+
+    private void refreshCannonBreakState()
+    {
+        if (!cannonPlaced)
+        {
+            return;
+        }
+
+        if (cannonBreakAtMillis <= 0L)
+        {
+            restartCannonBreakTimer();
+            return;
+        }
+
+        if (System.currentTimeMillis() >= cannonBreakAtMillis)
+        {
+            cannonBroken = true;
         }
     }
 
@@ -506,6 +751,56 @@ public class CannonAfkDimPlugin extends Plugin
     String getEstimatedTimeText()
     {
         return estimatedTimeText;
+    }
+
+    boolean shouldShowNoBraceletWarning()
+    {
+        return config.warnWhenNoBracelet() && !slayerBraceletEquipped;
+    }
+
+    boolean shouldShowTaskCompletedWarning()
+    {
+        return config.showTaskCompletedWarning() && !hasSlayerTask;
+    }
+
+    String getCannonBreakWarningText()
+    {
+        if (!config.showCannonBreakWarning() || !cannonPlaced || cannonBreakAtMillis <= 0L)
+        {
+            return "";
+        }
+
+        long remainingMillis = cannonBreakAtMillis - System.currentTimeMillis();
+
+        if (cannonBroken || remainingMillis <= 0L)
+        {
+            return "CANNON BROKEN";
+        }
+
+        if (remainingMillis > CANNON_WARNING_THRESHOLD_MILLIS)
+        {
+            return "";
+        }
+
+        long totalSeconds = Math.max(0L, (remainingMillis + 999L) / 1000L);
+        long minutes = totalSeconds / 60L;
+        long seconds = totalSeconds % 60L;
+
+        return String.format("%d:%02d until cannon breaks", minutes, seconds);
+    }
+
+    boolean shouldShowCannonInactiveWarning()
+    {
+        return config.showCannonInactiveWarning()
+                && dimmerToggledOn
+                && client.getGameState() == GameState.LOGGED_IN
+                && cannonPlaced
+                && (cannonballsLeft <= 0 || cannonBroken);
+    }
+
+    boolean shouldRenderWarningOnly()
+    {
+        return shouldShowCannonInactiveWarning();
     }
 
     boolean isDimmerToggledOn()
